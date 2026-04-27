@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CDN Image Browser</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --border:#262b36; --text:#e7e9ee;
+    --muted:#8a93a6; --accent:#5aa9ff; --ok:#3ddc84;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,Segoe UI,Roboto,Arial,sans-serif}
+  header{padding:14px 20px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--bg);z-index:5;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  header h1{font-size:16px;margin:0;font-weight:600}
+  .crumbs{display:flex;gap:6px;flex-wrap:wrap;color:var(--muted);font-size:13px;flex:1;min-width:200px}
+  .crumbs a{color:var(--accent);cursor:pointer;text-decoration:none}
+  .crumbs a:hover{text-decoration:underline}
+  .crumbs span.sep{opacity:.5}
+  .meta{font-size:12px;color:var(--muted)}
+  main{padding:18px 20px}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;transition:border-color .15s}
+  .card:hover{border-color:#3a4253}
+  .folder{cursor:pointer;padding:18px;display:flex;align-items:center;gap:10px}
+  .folder svg{flex:0 0 auto;color:#ffcb6b}
+  .folder .name{font-weight:500;word-break:break-all}
+  .folder .count{margin-left:auto;font-size:11px;color:var(--muted);background:#0f1115;padding:2px 6px;border-radius:10px}
+  .img-wrap{aspect-ratio:1/1;background:#000;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .img-wrap img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in}
+  .img-meta{padding:8px 10px;display:flex;flex-direction:column;gap:6px}
+  .img-name{font-size:12px;color:var(--muted);word-break:break-all;max-height:2.6em;overflow:hidden}
+  .copy{background:#222a39;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px}
+  .copy:hover{background:#2c3548}
+  .copy.ok{background:#1f3a2a;border-color:#2a5a3e;color:var(--ok)}
+  .empty,.loading,.error{padding:30px;color:var(--muted);text-align:center}
+  .error{color:#ff8a8a}
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(40px);background:#1f3a2a;border:1px solid #2a5a3e;color:var(--ok);padding:8px 14px;border-radius:8px;opacity:0;transition:.25s;max-width:90vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.92);display:none;align-items:center;justify-content:center;z-index:10;cursor:zoom-out;padding:20px}
+  .lightbox.show{display:flex}
+  .lightbox img{max-width:100%;max-height:100%;object-fit:contain}
+</style>
+</head>
+<body>
+<header>
+  <h1>CDN Image Browser</h1>
+  <nav class="crumbs" id="crumbs"></nav>
+  <span class="meta" id="meta"></span>
+</header>
+<main id="main"><div class="loading">Đang tải manifest…</div></main>
+<div class="toast" id="toast">Đã copy</div>
+<div class="lightbox" id="lightbox"><img alt=""></div>
+
+<script>
+const ROOT     = 'uploads';
+const MANIFEST = '/uploads/manifest.json';
+const CDN      = 'https://cdn.duc.name.vn';
+
+const $main   = document.getElementById('main');
+const $crumbs = document.getElementById('crumbs');
+const $meta   = document.getElementById('meta');
+const $toast  = document.getElementById('toast');
+const $lb     = document.getElementById('lightbox');
+const $lbImg  = $lb.querySelector('img');
+
+let TREE = null;
+
+function buildTree(files){
+  const root = { dirs:{}, files:[] };
+  for(const path of files){
+    const parts = path.split('/');
+    let node = root;
+    for(let i=0;i<parts.length-1;i++){
+      const seg = parts[i];
+      node.dirs[seg] = node.dirs[seg] || { dirs:{}, files:[] };
+      node = node.dirs[seg];
+    }
+    node.files.push({ name: parts[parts.length-1], path });
+  }
+  return root;
+}
+
+function getNode(path){
+  const parts = path.split('/').filter(Boolean);
+  let node = TREE;
+  for(const p of parts){
+    if(!node.dirs[p]) return null;
+    node = node.dirs[p];
+  }
+  return node;
+}
+
+function countDeep(node){
+  let n = node.files.length;
+  for(const k in node.dirs) n += countDeep(node.dirs[k]);
+  return n;
+}
+
+function renderCrumbs(path){
+  const parts = path.split('/').filter(Boolean);
+  $crumbs.innerHTML = '';
+  parts.forEach((p,i)=>{
+    if(i>0){ const s=document.createElement('span'); s.className='sep'; s.textContent='/'; $crumbs.append(s); }
+    if(i===parts.length-1){
+      const span=document.createElement('span'); span.textContent=p; $crumbs.append(span);
+    }else{
+      const a=document.createElement('a');
+      a.textContent=p;
+      const target=parts.slice(0,i+1).join('/');
+      a.onclick=()=>navigate(target);
+      $crumbs.append(a);
+    }
+  });
+}
+
+function folderCard(name, fullPath, count){
+  const el=document.createElement('div');
+  el.className='card folder';
+  el.innerHTML=`<svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg><span class="name">${name}</span><span class="count">${count}</span>`;
+  el.onclick=()=>navigate(fullPath);
+  return el;
+}
+
+const COPY_SVG = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+
+function imageCard(item){
+  const url=`${CDN}/${item.path}`;
+  const el=document.createElement('div');
+  el.className='card';
+  el.innerHTML=`
+    <div class="img-wrap"><img loading="lazy" src="${url}" alt="${item.name}"></div>
+    <div class="img-meta">
+      <div class="img-name" title="${item.name}">${item.name}</div>
+      <button class="copy" type="button">${COPY_SVG} Copy link</button>
+    </div>`;
+  el.querySelector('img').onclick=()=>{ $lbImg.src=url; $lb.classList.add('show'); };
+  el.querySelector('.copy').onclick=async (ev)=>{
+    const btn=ev.currentTarget;
+    try{ await navigator.clipboard.writeText(url); }
+    catch{ const t=document.createElement('textarea'); t.value=url; document.body.append(t); t.select(); document.execCommand('copy'); t.remove(); }
+    btn.classList.add('ok'); btn.innerHTML='Đã copy';
+    showToast(url);
+    setTimeout(()=>{ btn.classList.remove('ok'); btn.innerHTML=`${COPY_SVG} Copy link`; },1400);
+  };
+  return el;
+}
+
+function showToast(text){
+  $toast.textContent='Đã copy: '+text;
+  $toast.classList.add('show');
+  clearTimeout(showToast._t);
+  showToast._t=setTimeout(()=>$toast.classList.remove('show'),1800);
+}
+
+function navigate(path){
+  path = path.replace(/\/+$/,'') || ROOT;
+  history.replaceState(null,'','#'+path);
+  renderCrumbs(path);
+  const node = getNode(path);
+  if(!node){ $main.innerHTML='<div class="error">Không tìm thấy thư mục.</div>'; return; }
+  const dirEntries = Object.keys(node.dirs).sort((a,b)=>b.localeCompare(a,undefined,{numeric:true}));
+  const files      = [...node.files].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
+  if(!dirEntries.length && !files.length){ $main.innerHTML='<div class="empty">Thư mục rỗng.</div>'; return; }
+  const grid=document.createElement('div'); grid.className='grid';
+  dirEntries.forEach(name=>{
+    const child = node.dirs[name];
+    grid.append(folderCard(name, path+'/'+name, countDeep(child)));
+  });
+  files.forEach(f=>grid.append(imageCard(f)));
+  $main.innerHTML=''; $main.append(grid);
+}
+
+$lb.onclick=()=>{ $lb.classList.remove('show'); $lbImg.src=''; };
+document.addEventListener('keydown',e=>{ if(e.key==='Escape') $lb.classList.remove('show'); });
+
+(async ()=>{
+  try{
+    const r = await fetch(MANIFEST + '?t=' + Date.now());
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const data = await r.json();
+    TREE = buildTree(data.files || []);
+    if(data.generated && data.generated !== '1970-01-01T00:00:00Z'){
+      const d = new Date(data.generated);
+      $meta.textContent = `${data.count} ảnh · cập nhật ${d.toLocaleString()}`;
+    }else{
+      $meta.textContent = `${data.count||0} ảnh`;
+    }
+    const initial=(location.hash.replace(/^#/,'')||ROOT).replace(/\/+$/,'');
+    navigate(initial.startsWith(ROOT)?initial:ROOT);
+  }catch(e){
+    $main.innerHTML=`<div class="error">Không tải được manifest: ${e.message}<br><br>GitHub Action sẽ tự sinh <code>uploads/manifest.json</code> khi bạn push ảnh mới. Nếu repo chưa có file này, hãy chạy workflow "Build uploads manifest" thủ công ở tab Actions.</div>`;
+  }
+})();
+</script>
+</body>
+</html>

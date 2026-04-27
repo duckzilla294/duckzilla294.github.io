@@ -1,0 +1,57 @@
+name: Build uploads manifest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'uploads/**'
+      - '!uploads/manifest.json'
+      - '.github/workflows/build-manifest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-manifest
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate manifest
+        run: |
+          python3 - <<'PY'
+          import json, os, datetime
+          EXTS = ('.png','.jpg','.jpeg','.gif','.webp','.svg','.avif','.bmp','.ico')
+          files = []
+          for root, _, fs in os.walk('uploads'):
+              for f in fs:
+                  if f.lower().endswith(EXTS):
+                      files.append(os.path.join(root, f).replace('\\','/'))
+          files.sort()
+          out = {
+              'generated': datetime.datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+              'count': len(files),
+              'files': files,
+          }
+          os.makedirs('uploads', exist_ok=True)
+          with open('uploads/manifest.json', 'w', encoding='utf-8') as o:
+              json.dump(out, o, ensure_ascii=False, separators=(',', ':'))
+          print(f'Wrote {len(files)} entries')
+          PY
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uploads/manifest.json
+          if git diff --staged --quiet; then
+            echo "No changes"
+          else
+            git commit -m "chore: update uploads manifest"
+            git push
+          fi
